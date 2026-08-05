@@ -1,0 +1,15 @@
+{
+  "name": "Meu Treino",
+  "short_name": "Meu Treino",
+  "description": "Rotinas de musculação personalizadas — Smart Fit e modo viagem",
+  "start_url": ".",
+  "display": "standalone",
+  "background_color": "#15161A",
+  "theme_color": "#15161A",
+  "orientation": "portrait",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
