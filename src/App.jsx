@@ -1,7 +1,7 @@
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import {
   Dumbbell, Plane, TrendingUp, Scale, User, Check, ChevronDown,
-  RefreshCw, Plus, Trash2, Flame, Trophy, Calendar, Timer, Youtube,
+  RefreshCw, Plus, Trash2, Flame, Trophy, Calendar, Timer, Youtube, Activity, Download, Upload,
 } from "lucide-react";
 import {
   LineChart, Line, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid,
@@ -35,6 +35,35 @@ const GRUPOS = {
 };
 
 const DIAS = ["Dom", "Seg", "Ter", "Qua", "Qui", "Sex", "Sáb"];
+
+const TIPOS_CARDIO = [
+  ["esteira", "Esteira"],
+  ["bike", "Bike"],
+  ["eliptico", "Elíptico"],
+  ["escaladora", "Escaladora"],
+];
+
+const NIVEIS_INTENSIDADE = [
+  ["baixa", "Baixa"],
+  ["media", "Média"],
+  ["alta", "Alta"],
+];
+
+// MET por aparelho e por nível de esforço autoavaliado — referência
+// aproximada de compêndios de atividade física, não medição exata
+const MET_CARDIO = {
+  esteira: { baixa: 3.5, media: 6.0, alta: 9.5 },
+  bike: { baixa: 4.0, media: 7.0, alta: 10.5 },
+  eliptico: { baixa: 3.5, media: 5.0, alta: 7.5 },
+  escaladora: { baixa: 5.0, media: 8.0, alta: 11.0 },
+};
+const MET_PADRAO = { baixa: 4.0, media: 6.0, alta: 9.0 };
+
+function calcularCalorias(tipo, minutos, pesoKg, intensidade = "media") {
+  const tabela = MET_CARDIO[tipo] || MET_PADRAO;
+  const met = tabela[intensidade] ?? tabela.media;
+  return Math.round(met * (pesoKg || 70) * (minutos / 60));
+}
 
 /* ---------------------------------------------------------------
    BANCO DE EXERCÍCIOS — adaptado aos aparelhos da Smart Fit
@@ -75,18 +104,19 @@ const POOL = {
     { n: "Encolhimento com halteres", t: "I", eq: "halteres" },
   ],
   pernas: [
-    { n: "Leg press 45°", t: "C", eq: "maquina" },
-    { n: "Hack machine", t: "C", eq: "maquina" },
-    { n: "Agachamento no Smith", t: "C", eq: "maquina" },
-    { n: "Elevação pélvica (hip thrust)", t: "C", eq: "maquina" },
-    { n: "Afundo com halteres", t: "C", eq: "halteres" },
-    { n: "Cadeira extensora", t: "I", eq: "maquina" },
-    { n: "Mesa flexora", t: "I", eq: "maquina" },
-    { n: "Cadeira flexora", t: "I", eq: "maquina" },
-    { n: "Panturrilha em pé (máquina)", t: "I", eq: "maquina" },
-    { n: "Panturrilha sentado (máquina)", t: "I", eq: "maquina" },
-    { n: "Cadeira abdutora", t: "I", eq: "maquina" },
-    { n: "Cadeira adutora", t: "I", eq: "maquina" },
+    { n: "Leg press 45°", t: "C", eq: "maquina", enfase: "quad_posterior" },
+    { n: "Hack machine", t: "C", eq: "maquina", enfase: "quad_posterior" },
+    { n: "Agachamento no Smith", t: "C", eq: "maquina", enfase: "quad_posterior" },
+    { n: "Stiff com halteres (terra romeno)", t: "C", eq: "halteres", enfase: "quad_posterior" },
+    { n: "Elevação pélvica (hip thrust)", t: "C", eq: "maquina", enfase: "gluteo" },
+    { n: "Afundo com halteres", t: "C", eq: "halteres", enfase: "gluteo" },
+    { n: "Cadeira extensora", t: "I", eq: "maquina", enfase: "quad_posterior" },
+    { n: "Mesa flexora", t: "I", eq: "maquina", enfase: "quad_posterior" },
+    { n: "Cadeira flexora", t: "I", eq: "maquina", enfase: "quad_posterior" },
+    { n: "Cadeira abdutora", t: "I", eq: "maquina", enfase: "gluteo" },
+    { n: "Panturrilha em pé (máquina)", t: "I", eq: "maquina", enfase: "geral" },
+    { n: "Panturrilha sentado (máquina)", t: "I", eq: "maquina", enfase: "geral" },
+    { n: "Cadeira adutora", t: "I", eq: "maquina", enfase: "geral" },
   ],
   ombros: [
     { n: "Desenvolvimento máquina", t: "C", eq: "maquina" },
@@ -181,20 +211,33 @@ function girar(arr, n) {
   return [...arr.slice(k), ...arr.slice(0, k)];
 }
 
-// escolhe `qtd` exercícios de um pool, priorizando máquina antes de
-// completar com halteres/barra livre/corpo — só sai da máquina se
-// não houver opções suficientes ali dentro
-function selecionar(pool, ciclo, qtd, preferMaquina) {
+// escolhe `qtd` exercícios de um pool em camadas de prioridade:
+// primeiro `prioridades` (ex.: ênfase de perna) combinada com máquina,
+// depois `prioridades` sozinha, depois máquina sozinha, depois qualquer um.
+// só desce pra camada seguinte se a anterior não tiver opção suficiente.
+function selecionar(pool, ciclo, qtd, preferMaquina, prioridades = []) {
   if (qtd <= 0) return [];
-  if (!preferMaquina) return girar(pool, ciclo * qtd).slice(0, qtd);
+  const eMaquina = (e) => e.eq === "maquina";
+  const camadas = [
+    ...(preferMaquina ? prioridades.map((p) => (e) => p(e) && eMaquina(e)) : []),
+    ...prioridades,
+    ...(preferMaquina ? [eMaquina] : []),
+    () => true,
+  ];
 
-  const maq = pool.filter((e) => e.eq === "maquina");
-  const outros = pool.filter((e) => e.eq !== "maquina");
-  const selMaq = maq.length ? girar(maq, ciclo * qtd).slice(0, Math.min(qtd, maq.length)) : [];
-  const falta = qtd - selMaq.length;
-  if (falta <= 0) return selMaq;
-  const selOutros = outros.length ? girar(outros, ciclo * falta).slice(0, falta) : [];
-  return [...selMaq, ...selOutros];
+  let escolhidos = [];
+  let restantes = pool;
+  for (const filtro of camadas) {
+    if (escolhidos.length >= qtd) break;
+    const candidatos = restantes.filter(filtro);
+    if (!candidatos.length) continue;
+    const falta = qtd - escolhidos.length;
+    const usados = girar(candidatos, ciclo * falta).slice(0, Math.min(falta, candidatos.length));
+    escolhidos = [...escolhidos, ...usados];
+    const usadosSet = new Set(usados);
+    restantes = restantes.filter((e) => !usadosSet.has(e));
+  }
+  return escolhidos;
 }
 
 /* ---------------------------------------------------------------
@@ -290,9 +333,11 @@ function estimarMinutos(exercicios, minutosBase) {
   return Math.round((seg + aquecimentoPara(minutosBase)) / 60);
 }
 
-function montarTreino(grupo, ciclo, nivel, objetivo, idade, minutos = 30, preferMaquina = true) {
+function montarTreino(grupo, ciclo, nivel, objetivo, idade, minutos = 30, preferMaquina = true, enfasePernas = "padrao") {
   const pool = POOL[grupo];
   const { nC, nI } = calcQtdExercicios(minutos, objetivo, idade, nivel);
+  const prioridades =
+    grupo === "pernas" && enfasePernas !== "padrao" ? [(e) => e.enfase === enfasePernas] : [];
 
   let escolhidos = [];
   if (grupo === "bracos") {
@@ -309,8 +354,8 @@ function montarTreino(grupo, ciclo, nivel, objetivo, idade, minutos = 30, prefer
     const comp = pool.filter((e) => e.t === "C");
     const isol = pool.filter((e) => e.t === "I");
     escolhidos = [
-      ...selecionar(comp, ciclo, nC, preferMaquina),
-      ...selecionar(isol, ciclo, nI, preferMaquina),
+      ...selecionar(comp, ciclo, nC, preferMaquina, prioridades),
+      ...selecionar(isol, ciclo, nI, preferMaquina, prioridades),
     ];
   }
 
@@ -500,18 +545,21 @@ export default function App() {
   const [perfil, setPerfil] = useState(null);
   const [treinos, setTreinos] = useState([]);
   const [pesos, setPesos] = useState([]);
+  const [cardios, setCardios] = useState([]);
   const [aba, setAba] = useState("treino");
 
   useEffect(() => {
     (async () => {
-      const [p, t, w] = await Promise.all([
+      const [p, t, w, c] = await Promise.all([
         store.get("gym:perfil", null),
         store.get("gym:treinos", []),
         store.get("gym:pesos", []),
+        store.get("gym:cardios", []),
       ]);
       setPerfil(p);
       setTreinos(t || []);
       setPesos(w || []);
+      setCardios(c || []);
       setCarregando(false);
     })();
   }, []);
@@ -519,6 +567,7 @@ export default function App() {
   const salvarPerfil = (p) => { setPerfil(p); store.set("gym:perfil", p); };
   const salvarTreinos = (t) => { setTreinos(t); store.set("gym:treinos", t); };
   const salvarPesos = (w) => { setPesos(w); store.set("gym:pesos", w); };
+  const salvarCardios = (c) => { setCardios(c); store.set("gym:cardios", c); };
 
   return (
     <div className="gym">
@@ -534,14 +583,19 @@ export default function App() {
           {aba === "treino" && (
             <Treino perfil={perfil} treinos={treinos} salvarTreinos={salvarTreinos} salvarPerfil={salvarPerfil} />
           )}
+          {aba === "cardio" && <Cardio perfil={perfil} cardios={cardios} salvarCardios={salvarCardios} />}
           {aba === "progresso" && <Progresso perfil={perfil} treinos={treinos} salvarTreinos={salvarTreinos} />}
           {aba === "peso" && <Peso perfil={perfil} pesos={pesos} salvarPesos={salvarPesos} salvarPerfil={salvarPerfil} />}
           {aba === "perfil" && (
-            <Perfil perfil={perfil} salvarPerfil={salvarPerfil} salvarTreinos={salvarTreinos} salvarPesos={salvarPesos} />
+            <Perfil perfil={perfil} salvarPerfil={salvarPerfil}
+              treinos={treinos} salvarTreinos={salvarTreinos}
+              pesos={pesos} salvarPesos={salvarPesos}
+              cardios={cardios} salvarCardios={salvarCardios} />
           )}
           <nav className="nav">
             {[
               ["treino", "Treino", Dumbbell],
+              ["cardio", "Cardio", Activity],
               ["progresso", "Progresso", TrendingUp],
               ["peso", "Peso", Scale],
               ["perfil", "Perfil", User],
@@ -565,7 +619,7 @@ function Onboarding({ onPronto }) {
   const [f, setF] = useState({
     nome: "", idade: "", peso: "", altura: "",
     nivel: "intermediario", objetivo: "hipertrofia",
-    dias: [1, 2, 3, 4, 5], minutosTreino: 30, prefMaquina: true,
+    dias: [1, 2, 3, 4, 5], minutosTreino: 30, prefMaquina: true, enfasePernas: "padrao",
     ordem: ["peito", "costas", "pernas", "ombros", "bracos"],
   });
   const set = (k, v) => setF((s) => ({ ...s, [k]: v }));
@@ -706,7 +760,7 @@ function Treino({ perfil, treinos, salvarTreinos, salvarPerfil }) {
   const exercicios = useMemo(() => {
     if (viagem) return montarViagem(equip, minutos, ciclo, perfil.objetivo, perfil.idade);
     if (!grupo) return [];
-    return montarTreino(grupo, ciclo, perfil.nivel, perfil.objetivo, perfil.idade, perfil.minutosTreino || 30, perfil.prefMaquina !== false);
+    return montarTreino(grupo, ciclo, perfil.nivel, perfil.objetivo, perfil.idade, perfil.minutosTreino || 30, perfil.prefMaquina !== false, perfil.enfasePernas || "padrao");
   }, [viagem, equip, minutos, grupo, ciclo, perfil]);
 
   const minutosEstimados = useMemo(
@@ -1071,6 +1125,177 @@ function Progresso({ perfil, treinos, salvarTreinos }) {
 }
 
 /* ---------------------------------------------------------------
+   ABA CARDIO
+--------------------------------------------------------------- */
+function Cardio({ perfil, cardios, salvarCardios }) {
+  const [tipo, setTipo] = useState("esteira");
+  const [intensidade, setIntensidade] = useState("media");
+  const [minutos, setMinutos] = useState("");
+
+  const pesoAtual = perfil.peso || 70;
+
+  const ordenados = useMemo(() => [...cardios].sort((a, b) => b.data.localeCompare(a.data)), [cardios]);
+  const hojeEntradas = useMemo(() => cardios.filter((c) => c.data === hoje()), [cardios]);
+  const semanaEntradas = useMemo(
+    () => cardios.filter((c) => inicioSemana(c.data) === inicioSemana(hoje())),
+    [cardios]
+  );
+
+  const minHoje = hojeEntradas.reduce((a, c) => a + c.minutos, 0);
+  const minSemana = semanaEntradas.reduce((a, c) => a + c.minutos, 0);
+  const kcalSemana = semanaEntradas.reduce((a, c) => a + calcularCalorias(c.tipo, c.minutos, pesoAtual, c.intensidade), 0);
+
+  const semanas = useMemo(() => {
+    const m = {};
+    cardios.forEach((c) => {
+      const k = inicioSemana(c.data);
+      m[k] = (m[k] || 0) + calcularCalorias(c.tipo, c.minutos, pesoAtual, c.intensidade);
+    });
+    const hojeSem = inicioSemana(hoje());
+    const out = [];
+    for (let i = 7; i >= 0; i--) {
+      const d = new Date(hojeSem + "T12:00:00");
+      d.setDate(d.getDate() - i * 7);
+      const k = d.toISOString().slice(0, 10);
+      out.push({ sem: fmtData(k), kcal: Math.round(m[k] || 0) });
+    }
+    return out;
+  }, [cardios, pesoAtual]);
+
+  const registrar = () => {
+    const min = parseInt(minutos, 10);
+    if (!min || min <= 0) return;
+    const outros = cardios.filter((c) => !(c.data === hoje() && c.tipo === tipo));
+    salvarCardios([...outros, { data: hoje(), tipo, minutos: min, intensidade }]);
+    setMinutos("");
+  };
+
+  const apagar = (data, t) => salvarCardios(cardios.filter((c) => !(c.data === data && c.tipo === t)));
+
+  return (
+    <div className="wrap" style={{ paddingTop: 26, paddingBottom: 20 }}>
+      <h1 className="disp" style={{ fontSize: 27 }}>Cardio</h1>
+
+      <div className="card" style={{ marginTop: 16, padding: 14 }}>
+        <div className="eyebrow" style={{ marginBottom: 9 }}>Registrar cardio de hoje</div>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
+          {TIPOS_CARDIO.map(([v, l]) => (
+            <button key={v} className="chip" data-on={tipo === v ? 1 : 0} onClick={() => setTipo(v)}>{l}</button>
+          ))}
+        </div>
+        <div className="eyebrow" style={{ marginBottom: 7 }}>Intensidade (como você sentiu o esforço)</div>
+        <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+          {NIVEIS_INTENSIDADE.map(([v, l]) => (
+            <button key={v} className="chip" style={{ flex: 1 }} data-on={intensidade === v ? 1 : 0} onClick={() => setIntensidade(v)}>{l}</button>
+          ))}
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <input className="f mono" inputMode="numeric" placeholder="30 (minutos)" value={minutos}
+            onChange={(e) => setMinutos(e.target.value.replace(/\D/g, ""))} />
+          <button className="btn btn-p" style={{ flexShrink: 0 }} onClick={registrar}>
+            <Plus size={16} /> Registrar
+          </button>
+        </div>
+
+        {hojeEntradas.length > 0 && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 12 }}>
+            {hojeEntradas.map((c) => (
+              <div key={c.tipo} style={{
+                background: C.bg2, border: `1px solid ${C.line}`, borderRadius: 10, padding: "9px 11px",
+                display: "flex", alignItems: "center", gap: 10,
+              }}>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 13, fontWeight: 600 }}>
+                    {TIPOS_CARDIO.find((t) => t[0] === c.tipo)?.[1] || c.tipo}
+                    <span style={{ color: C.mut, fontWeight: 500 }}>
+                      {" "}· {NIVEIS_INTENSIDADE.find((n) => n[0] === (c.intensidade || "media"))?.[1]}
+                    </span>
+                  </div>
+                  <div className="mono" style={{ fontSize: 11.5, color: C.mut, marginTop: 1 }}>
+                    {c.minutos} min · ~{calcularCalorias(c.tipo, c.minutos, pesoAtual, c.intensidade)} kcal
+                  </div>
+                </div>
+                <button onClick={() => apagar(c.data, c.tipo)} aria-label="Apagar" style={{ background: "none", border: 0, cursor: "pointer", padding: 2 }}>
+                  <Trash2 size={13} color={C.mut} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {!cardios.length ? (
+        <div className="card" style={{ marginTop: 16, padding: 26, textAlign: "center" }}>
+          <Activity size={26} color={C.mut} />
+          <div style={{ fontSize: 14, fontWeight: 600, marginTop: 12 }}>Nada registrado ainda</div>
+          <div style={{ fontSize: 13, color: C.mut, marginTop: 6, lineHeight: 1.5 }}>
+            Registre seu cardio aqui em cima pra ver o progresso e a estimativa de calorias.
+          </div>
+        </div>
+      ) : (
+        <>
+          <div className="grid3" style={{ marginTop: 16 }}>
+            <div className="card stat">
+              <div className="stat-v">{minHoje}<span style={{ fontSize: 12, color: C.mut }}> min</span></div>
+              <div className="stat-l">Hoje</div>
+            </div>
+            <div className="card stat">
+              <div className="stat-v">{minSemana}<span style={{ fontSize: 12, color: C.mut }}> min</span></div>
+              <div className="stat-l">Esta semana</div>
+            </div>
+            <div className="card stat">
+              <div className="stat-v" style={{ fontSize: 22 }}>~{nfmt(kcalSemana)}</div>
+              <div className="stat-l">Kcal na semana</div>
+            </div>
+          </div>
+
+          <div className="card" style={{ marginTop: 12, padding: "16px 8px 8px" }}>
+            <div className="eyebrow" style={{ paddingLeft: 8, marginBottom: 12 }}>Calorias estimadas por semana</div>
+            <ResponsiveContainer width="100%" height={165}>
+              <BarChart data={semanas} margin={{ top: 4, right: 8, left: -14, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="2 4" stroke={C.line} vertical={false} />
+                <XAxis dataKey="sem" tick={{ fill: C.mut, fontSize: 10, fontFamily: "IBM Plex Mono" }} axisLine={false} tickLine={false} />
+                <YAxis tick={{ fill: C.mut, fontSize: 10, fontFamily: "IBM Plex Mono" }} axisLine={false} tickLine={false} />
+                <Tooltip cursor={{ fill: "rgba(255,255,255,.04)" }}
+                  contentStyle={{ background: C.bg2, border: `1px solid ${C.line}`, borderRadius: 10, fontSize: 12, color: C.txt }} />
+                <Bar dataKey="kcal" fill={C.p20} radius={[4, 4, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+            <div style={{ fontSize: 11, color: C.mut, padding: "0 8px", marginTop: 4, lineHeight: 1.5 }}>
+              Estimativa baseada na intensidade que você marcou em cada registro e no seu peso atual ({nfmt(pesoAtual)}kg) — ainda é uma referência, não uma medição exata.
+            </div>
+          </div>
+
+          <div className="eyebrow" style={{ marginTop: 22, marginBottom: 10 }}>Histórico</div>
+          <div className="card" style={{ marginBottom: 20 }}>
+            {ordenados.slice(0, 20).map((c) => (
+              <div key={c.data + c.tipo} className="ex" style={{ padding: "12px 15px", display: "flex", alignItems: "center", gap: 11 }}>
+                <div style={{ width: 6, height: 26, borderRadius: 3, background: C.p20 }} />
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 14, fontWeight: 600 }}>
+                    {TIPOS_CARDIO.find((t) => t[0] === c.tipo)?.[1] || c.tipo}
+                    <span style={{ color: C.mut, fontWeight: 500 }}>
+                      {" "}· {NIVEIS_INTENSIDADE.find((n) => n[0] === (c.intensidade || "media"))?.[1]}
+                    </span>
+                  </div>
+                  <div className="mono" style={{ fontSize: 11.5, color: C.mut, marginTop: 2 }}>
+                    {fmtData(c.data)} · {c.minutos} min · ~{calcularCalorias(c.tipo, c.minutos, pesoAtual, c.intensidade)} kcal
+                  </div>
+                </div>
+                <button className="btn btn-sm" style={{ padding: 8 }} aria-label="Apagar cardio"
+                  onClick={() => apagar(c.data, c.tipo)}>
+                  <Trash2 size={14} color={C.mut} />
+                </button>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------------
    ABA PESO
 --------------------------------------------------------------- */
 function Peso({ perfil, pesos, salvarPesos, salvarPerfil }) {
@@ -1162,10 +1387,59 @@ function Peso({ perfil, pesos, salvarPesos, salvarPerfil }) {
 /* ---------------------------------------------------------------
    ABA PERFIL
 --------------------------------------------------------------- */
-function Perfil({ perfil, salvarPerfil, salvarTreinos, salvarPesos }) {
+function Perfil({ perfil, salvarPerfil, treinos, salvarTreinos, pesos, salvarPesos, cardios, salvarCardios }) {
   const [p, setP] = useState(perfil);
   const [confirmar, setConfirmar] = useState(false);
+  const [pendente, setPendente] = useState(null);
+  const [msgBackup, setMsgBackup] = useState(null);
+  const arquivoRef = useRef(null);
   const set = (k, v) => { const n = { ...p, [k]: v }; setP(n); salvarPerfil(n); };
+
+  const exportarBackup = () => {
+    const dados = { versao: 1, exportadoEm: new Date().toISOString(), perfil: p, treinos, pesos, cardios };
+    const blob = new Blob([JSON.stringify(dados, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `meu-treino-backup-${hoje()}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    setMsgBackup({ ok: true, texto: "Backup exportado — confira a pasta de downloads do celular." });
+  };
+
+  const selecionarArquivo = (e) => {
+    const arquivo = e.target.files?.[0];
+    e.target.value = "";
+    if (!arquivo) return;
+    const leitor = new FileReader();
+    leitor.onload = () => {
+      try {
+        const dados = JSON.parse(leitor.result);
+        if (!dados || typeof dados !== "object" || !dados.perfil) {
+          setMsgBackup({ ok: false, texto: "Esse arquivo não parece um backup do Meu Treino." });
+          return;
+        }
+        setPendente(dados);
+        setMsgBackup(null);
+      } catch {
+        setMsgBackup({ ok: false, texto: "Não consegui ler esse arquivo." });
+      }
+    };
+    leitor.readAsText(arquivo);
+  };
+
+  const confirmarImportacao = () => {
+    if (!pendente) return;
+    salvarPerfil(pendente.perfil || null);
+    setP(pendente.perfil || p);
+    salvarTreinos(pendente.treinos || []);
+    salvarPesos(pendente.pesos || []);
+    salvarCardios(pendente.cardios || []);
+    setPendente(null);
+    setMsgBackup({ ok: true, texto: "Backup importado com sucesso." });
+  };
 
   const mover = (i, dir) => {
     const o = [...p.ordem];
@@ -1260,6 +1534,27 @@ function Perfil({ perfil, salvarPerfil, salvarTreinos, salvarPesos }) {
       </button>
 
       <div style={{ marginTop: 16 }}>
+        <div className="eyebrow" style={{ marginBottom: 8 }}>Ênfase em pernas</div>
+        <div style={{ display: "flex", gap: 7, flexWrap: "wrap" }}>
+          {[
+            ["padrao", "Padrão"],
+            ["gluteo", "Mais glúteo"],
+            ["quad_posterior", "Mais quadríceps/posterior"],
+          ].map(([v, l]) => (
+            <button key={v} className="chip" data-on={(p.enfasePernas || "padrao") === v ? 1 : 0}
+              onClick={() => set("enfasePernas", v)}>{l}</button>
+          ))}
+        </div>
+        <div style={{ fontSize: 12, color: C.mut, marginTop: 8, lineHeight: 1.5 }}>
+          {(p.enfasePernas || "padrao") === "gluteo"
+            ? "Prioriza hip thrust, afundo e cadeira abdutora. A Smart Fit tem poucos aparelhos dedicados a glúteo, então às vezes ainda entra algo genérico pra completar."
+            : (p.enfasePernas || "padrao") === "quad_posterior"
+            ? "Prioriza leg press, hack, agachamento, extensora, flexora e stiff — é onde a Smart Fit tem mais opção de aparelho."
+            : "Mistura equilibrada entre quadríceps, posterior e glúteo, sem favorecer nenhum."}
+        </div>
+      </div>
+
+      <div style={{ marginTop: 16 }}>
         <div className="eyebrow" style={{ marginBottom: 8 }}>Dias de treino</div>
         <div style={{ display: "flex", gap: 6 }}>
           {DIAS.map((d, i) => (
@@ -1295,6 +1590,45 @@ function Perfil({ perfil, salvarPerfil, salvarTreinos, salvarPesos }) {
         </button>
       </div>
 
+      <div className="card" style={{ marginTop: 12, padding: 14 }}>
+        <div style={{ fontSize: 14, fontWeight: 600 }}>Backup</div>
+        <div style={{ fontSize: 13, color: C.mut, marginTop: 5, lineHeight: 1.5 }}>
+          Seus dados ficam só neste celular. Exporte de vez em quando — principalmente antes de trocar de aparelho.
+        </div>
+        <div style={{ display: "flex", gap: 8, marginTop: 11 }}>
+          <button className="btn" style={{ flex: 1 }} onClick={exportarBackup}>
+            <Download size={15} /> Exportar
+          </button>
+          <button className="btn" style={{ flex: 1 }} onClick={() => arquivoRef.current?.click()}>
+            <Upload size={15} /> Importar
+          </button>
+          <input ref={arquivoRef} type="file" accept="application/json" style={{ display: "none" }} onChange={selecionarArquivo} />
+        </div>
+        {msgBackup && (
+          <div style={{ fontSize: 12, color: msgBackup.ok ? C.p10 : C.p25, marginTop: 10, lineHeight: 1.5 }}>
+            {msgBackup.texto}
+          </div>
+        )}
+      </div>
+
+      {pendente && (
+        <div className="card" style={{ marginTop: 12, padding: 14, borderColor: C.p15 }}>
+          <div style={{ fontSize: 14, fontWeight: 600 }}>Confirmar importação</div>
+          <div style={{ fontSize: 13, color: C.mut, marginTop: 5, lineHeight: 1.5 }}>
+            Isso substitui TODOS os dados deste celular pelos do arquivo — {pendente.treinos?.length || 0} treinos,
+            {" "}{pendente.pesos?.length || 0} registros de peso e {pendente.cardios?.length || 0} de cardio.
+            {pendente.exportadoEm && ` Exportado em ${new Date(pendente.exportadoEm).toLocaleDateString("pt-BR")}.`}
+          </div>
+          <div style={{ display: "flex", gap: 8, marginTop: 11 }}>
+            <button className="btn" style={{ flex: 1 }} onClick={() => setPendente(null)}>Cancelar</button>
+            <button className="btn" style={{ flex: 1, background: C.p15, borderColor: C.p15, color: "#1A1400" }}
+              onClick={confirmarImportacao}>
+              Substituir dados
+            </button>
+          </div>
+        </div>
+      )}
+
       <div className="card" style={{ marginTop: 12, padding: 14, borderColor: confirmar ? C.p25 : C.line }}>
         <div style={{ fontSize: 14, fontWeight: 600 }}>Apagar todos os dados</div>
         <div style={{ fontSize: 13, color: C.mut, marginTop: 5, lineHeight: 1.5 }}>
@@ -1305,7 +1639,7 @@ function Perfil({ perfil, salvarPerfil, salvarTreinos, salvarPesos }) {
             <button className="btn" style={{ flex: 1 }} onClick={() => setConfirmar(false)}>Cancelar</button>
             <button className="btn" style={{ flex: 1, background: C.p25, borderColor: C.p25, color: "#fff" }}
               onClick={async () => {
-                salvarTreinos([]); salvarPesos([]); salvarPerfil(null);
+                salvarTreinos([]); salvarPesos([]); salvarCardios([]); salvarPerfil(null);
                 await store.delete("gym:perfil");
               }}>
               Apagar tudo
